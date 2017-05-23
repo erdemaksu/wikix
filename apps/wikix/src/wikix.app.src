@@ -1,0 +1,17 @@
+{application, wikix,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { wikix_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    gb_conf, gb_log, pbpc
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
