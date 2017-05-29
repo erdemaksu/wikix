@@ -25,7 +25,8 @@
 
 %% API functions
 -export([test/1,
-	 import/2]).
+	 import/2,
+	 import/3]).
 
 -export([continuation/2,
 	 event/2,
@@ -38,40 +39,48 @@
 %%% API functions
 %%%===================================================================
 test(small)->
-    import("/home/erdem/github/wikix/wiki_sm.xml", 5);
+    import("/nvme/data/wiki_sm.xml", 5);
 test(medium)->
-    import("/home/erdem/github/wikix/wiki_md.xml", 10);
+    import("/nvme/data/wiki_md.xml", 10);
 test(big)->
-    import("/opt/MA/enwiki-20170401-pages-meta-current.xml", 5);
+    import("/nvme/data/enwiki-20170401-pages-meta-current.xml", 5);
 test(bigger)->
-    import("/opt/MA/enwiki-20170401-pages-meta-current.xml", 1024);
+    import("/nvme/data/enwiki-20170401-pages-meta-current.xml", 1024);
 test(biggest)-> %% 1859390996 Lines
-    import("/opt/MA/enwiki-20170401-pages-meta-current.xml", undefined).
+    import("/nvme/data/enwiki-20170401-pages-meta-current.xml", undefined).
+
+import(Filename, N) ->
+    {ok, Session} = pbpc:connect("127.0.0.1", 8887, "admin", "admin"),
+    import(Session, Filename, N),
+    ok = pbpc:disconnect(Session).
 
 -spec import(Filename :: string(), N :: integer() | undefined) ->
     ok.
-import(Filename, N) ->
+import(Session, Filename, N) ->
     case file:open(Filename, [raw, read,binary])  of
 	{error, Reason} ->
 	    {error,{Filename, file:format_error(Reason)}};
 	{ok, FD} ->
-	    {ok, Session} = pbpc:connect("127.0.0.1", 8887, "admin", "admin"),
 	    pbpc:delete_table(Session, ?TABLE),
-	    %%ok = pbpc:create_table(Session, ?TABLE, ["title"], [{type, rocksdb}]),
-	    ok = pbpc:create_table(Session, ?TABLE, ["title"], []),
+	    ok = pbpc:create_table(Session, ?TABLE, ["title"],
+				   [{type, rocksdb},
+				    %%{ttl, 3000},
+				    {num_of_shards, 8},
+				    {hashing_method, uniform},
+				    {data_model, array},
+				    {comparator, ascending}]),
 	    %%ok = pbpc:add_index(Session, ?TABLE, ["text"]),
 	    Acc = #{pages => 0,
 		    max_pages => N,
 		    data => #{},
 		    tags => [],
 		    session => Session},
-	    State = {FD, 0, 4096},
+	    State = {FD, 0, 4096000},
 	    Res = (catch erlsom:parse_sax(<<>>, Acc, fun event/2,
 		[{continuation_function, fun continuation/2, State},
 		 {max_entity_size, infinity},
 		 {max_expanded_entity_size, infinity}])),
 	    timer:sleep(1000),
-	    ok = pbpc:disconnect(Session),
 	    Res
     end.
 
@@ -90,6 +99,10 @@ event({endElement, _Uri, "page", _}, State = #{tags := ["page" | Rest],
 					       pages := P,
 					       max_pages := undefined,
 					       session := Session}) ->
+    case P rem 10000 of
+	0 -> io:format("~p.",[P]);
+	_ -> ok
+    end,
     erlang:spawn(?MODULE, store, [Session, Data]),
     %store(Session, Data),
     State#{tags => Rest, pages => P+1, data => #{}};
@@ -101,6 +114,10 @@ event({endElement, _Uri, "page", _}, State = #{tags := ["page" | Rest],
     erlang:spawn(?MODULE, store, [Session, Data]),
     %store(Session, Data),
     Sum = P+1,
+    case Sum rem 10000 of
+	0 -> io:format("~p.",[Sum]);
+	_ -> ok
+    end,
     EndState = State#{tags => Rest, pages => Sum, data => #{}},
     case Sum of
 	N -> throw( {stop, "max_pages_reached", EndState} );
