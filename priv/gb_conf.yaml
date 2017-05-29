@@ -1,0 +1,14 @@
+# GB_CONF Application configuration file.
+---
+app_name  : gb_conf
+notify_cb : [gb_conf, notify]
+verify_cb : # alternative yaml list representation
+  - gb_conf # Module name
+  - verify  # Function name
+params:
+    mnesia_nodes            : [] #List of erlang node names. Empty list defaults to node()
+    db_mods                 : [gb_conf_db]
+    num_of_versions_to_keep : 5
+    configurations          : {
+	gb_log  : "gb_log.yaml"
+    }
