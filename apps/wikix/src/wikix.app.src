@@ -6,7 +6,7 @@
   {applications,
    [kernel,
     stdlib,
-    gb_conf, gb_log, pbpc
+    gb_conf, gb_log, pbpc, jiffy
    ]},
   {env,[]},
   {modules, []},

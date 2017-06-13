@@ -20,13 +20,17 @@
 %%%===================================================================
 
 
--module(wikix).
+-module(wikix_xml).
 
 
 %% API functions
 -export([test/1,
 	 import/2,
-	 import/3]).
+	 import/3,
+	 index/2,
+	 index_on_node/1,
+	 index_on_node_/1
+	 ]).
 
 -export([continuation/2,
 	 event/2,
@@ -49,12 +53,85 @@ test(bigger)->
 test(biggest)-> %% 1859390996 Lines
     import("/nvme/data/enwiki-20170401-pages-meta-current.xml", undefined).
 
+-spec index_on_node(Tab :: string()) ->
+    {ok, integer()}.
+index_on_node(Tab) ->
+    {Module, Binary, File} = code:get_object_code(?MODULE),
+    rpc:call(pundun97ae64@sitting, code, load_binary, [Module, File, Binary]),
+    rpc:call(pundun97ae64@sitting, wikix, index_on_node_, [Tab], infinity).
+
+index_on_node_(Tab) ->
+    enterdb:delete_table(Tab),
+    enterdb:create_table(Tab, ["title"], [{type, rocksdb},{num_of_shards, 8},
+					  {comparator, ascending}]),
+    ok = enterdb:add_index(Tab, ["text"]),
+    case enterdb:first(?TABLE) of
+	{ok, KV, It} ->
+	    index_loop_on_node(Tab, KV, It, 0);
+	{error,invalid} ->
+	    {ok, 0}
+    end.
+    
+index_loop_on_node(Tab, {Key, Val}, It, Count) ->
+    case Count rem 10000 of
+	0 -> io:format("~p.",[Count]);
+	_ -> ok
+    end,
+    spawn(fun() -> enterdb:write(Tab, Key, Val) end),
+    case enterdb:next(It) of
+	{ok, KV} ->
+	    index_loop_on_node(Tab, KV, It, Count+1);
+	{error,invalid} ->
+	    {ok, Count+1}
+    end.
+
+-spec index(Session:: pid(), Tab :: string()) ->
+    {ok, integer()}.
+index(Session, Tab) ->
+    %%pbpc:delete_table(Session, Tab),
+    rpc:call(pundun97ae64@sitting, enterdb, delete_table, [Tab]),
+    %%ok = pbpc:create_table(Session, Tab, ["title"],
+%%			    [{type, rocksdb},
+%%			     {num_of_shards, 8},
+%%			     {comparator, ascending}]),
+    rpc:call(pundun97ae64@sitting, enterdb, create_table, [Tab, ["title"],
+							   [{type, rocksdb},
+							    {num_of_shards, 8},
+							    {comparator, ascending}]]),
+    %ok = pbpc:add_index(Session, Tab, ["text"]),
+    %%case pbpc:first(Session, ?TABLE) of
+    case rpc:call(pundun97ae64@sitting, enterdb, first, [?TABLE]) of
+	{ok, KV, It} ->
+	    index_loop(Session, Tab, KV, It, 0);
+	%%{error,{system,"{error,invalid}"}} ->
+	{error,invalid} ->
+	    {ok, 0}
+    end.
+    
+index_loop(Session, Tab, {Key, Val}, It, Count) ->
+    case Count rem 10000 of
+	0 -> io:format("~p.",[Count]);
+	_ -> ok
+    end,
+    %%pbpc:write(Session, Tab, Key, Val),
+    rpc:call(pundun97ae64@sitting, enterdb, write, [Tab, Key, Val]),
+    %%case pbpc:next(Session, It) of
+    case rpc:call(pundun97ae64@sitting, enterdb, next, [It]) of
+	{ok, KV} ->
+	    index_loop(Session, Tab, KV, It, Count+1);
+	%%{error,{system,"{error,invalid}"}} ->
+	{error,invalid} ->
+	    {ok, Count+1}
+    end.
+
 import(Filename, N) ->
     {ok, Session} = pbpc:connect("127.0.0.1", 8887, "admin", "admin"),
     import(Session, Filename, N),
     ok = pbpc:disconnect(Session).
 
--spec import(Filename :: string(), N :: integer() | undefined) ->
+-spec import(Session :: pid(),
+	     Filename :: string(),
+	     N :: integer() | undefined) ->
     ok.
 import(Session, Filename, N) ->
     case file:open(Filename, [raw, read,binary])  of

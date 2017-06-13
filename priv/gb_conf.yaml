@@ -9,6 +9,7 @@ params:
     mnesia_nodes            : [] #List of erlang node names. Empty list defaults to node()
     db_mods                 : [gb_conf_db]
     num_of_versions_to_keep : 5
+    prod_dir_env	    : "PRODDIR"
     configurations          : {
 	gb_log  : "gb_log.yaml"
     }
