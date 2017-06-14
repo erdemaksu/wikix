@@ -28,7 +28,7 @@
 	 import/3]).
 
 %% Spawned functions
--export([server/3,
+-export([server/5,
 	 client/3]).
 
 -include_lib("gb_log/include/gb_log.hrl").
@@ -41,99 +41,120 @@ import(Dir, N) ->
     import(Session, Dir, N),
     ok = pbpc:disconnect(Session).
 
--spec import(Session :: pid(),
+-spec import(Connection :: term(),
 	     Dir :: string(),
 	     N :: integer() | undefined) ->
     ok.
-import(Session, Dir, N) ->
+import(Connection, Dir, N) ->
     {ok, Filenames} = file:list_dir(Dir),
     %io:format("[~p:~p] Filenames: ~p~n", [?MODULE, ?LINE, Filenames]),
 
     Tab = filename:basename(Dir),
-    pbpc:delete_table(Session, Tab),
-    ok = pbpc:create_table(Session, Tab, ["title"],
-			   [{type, rocksdb},
-			    %%{ttl, 3000},
-			    {num_of_shards, 8},
-			    {hashing_method, uniform},
-			    {data_model, array},
-			    {comparator, ascending}]),
-    IndexOn = ["popularity_score","incoming_links","redirect","defaultsort",
-	       "auxiliary_text","opening_text","heading","language",
-	       "text_bytes","source_text","text","template","outgoing_link",
-	       "external_link","category","timestamp","namespace_text",
-	       "namespace","wiki","version","version_type","wikibase_item"],
-    ok = pbpc:add_index(Session, Tab, IndexOn),
-    SPid = spawn(?MODULE, server, [Dir, Filenames, N]),
-    [spawn(?MODULE, client, [SPid, Session, Tab] ) || _ <- lists:seq(1,N)].
+    {ok, Session} = connect(Connection),
+    rpc(Session, delete_table, [Tab]),
+    ok = rpc(Session, create_table, [Tab, ["title"], [{type, rocksdb},
+						     %%{ttl, 3000},
+						      {num_of_shards, 8},
+						      {hashing_method, uniform},
+						      {data_model, array},
+						      {comparator, ascending}]]),
+    IndexOn = [ "auxiliary_text","category","content_model","coordinates",
+		"defaultsort","external_link","heading","incoming_links",
+		"language","namespace","namespace_text","opening_text",
+		"outgoing_link","popularity_score","redirect","source_text",
+		"template","text","text_bytes","timestamp","version",
+		"version_type","wiki","wikibase_item"],
+    ok = rpc(Session, add_index, [Tab, IndexOn]),
+    disconnect(Session),
+    SPid = spawn(?MODULE, server, [Dir, Filenames, N, 0, 0]),
+    [spawn(?MODULE, client, [SPid, Connection, Tab] ) || _ <- lists:seq(1,N)],
+    _MonitorRef = erlang:monitor(process, SPid),
+    register(my_server, SPid),
+    {ok, SPid}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-server(_Dir, _Filenames, 0) ->
+connect(Node) when is_atom(Node) ->
+    {ok, Node};
+connect({Host, Port, User, Pass}) ->
+    pbpc:connect(Host, Port, User, Pass).
+
+disconnect(Node) when is_atom(Node)->
     ok;
-server(Dir, Filenames, N) ->
+disconnect(Session) when is_pid(Session) ->
+    pbpc:disconnect(Session).
+
+server(_Dir, _Filenames, 0, Success, Fail) ->
+   io:format("[~p:~p] Success: ~p Fail: ~p~nServer stopping..~n",[?MODULE,?LINE, Success, Fail]);
+server(Dir, Filenames, N, S, F) ->
     receive
+	stop ->
+	    server(Dir, [], N, S, F);
+	{write_result, ok} ->
+	    server(Dir, Filenames, N, S+1, F);
+	{write_result, {error, _}} ->
+	    server(Dir, Filenames, N, S, F+1);
 	{client, Pid, register} ->
 	    erlang:monitor(process, Pid),
-	    server(Dir, Filenames, N);
+	    server(Dir, Filenames, N, S, F);
 	{client, Pid, file} ->
 	    case Filenames of
 		[H | T] ->
 		    Pid ! {server, file, filename:join(Dir, H)},
-		    server(Dir, T, N);
+		    server(Dir, T, N, S, F);
 		[] ->
 		    Pid ! {server, stop},
-		    server(Dir, [], N)
+		    server(Dir, [], N, S, F)
 	    end;
 	{'DOWN', _MonitorRef, process, _Object, _Info} ->
-	    server(Dir, Filenames, N-1)
+	    server(Dir, Filenames, N-1, S, F)
     end.
 
-client(SPid, Session, Tab) ->
+client(SPid, Connection, Tab) ->
     SPid ! {client, self(), register},
+    {ok, Session} = connect(Connection),
     client_loop(SPid, Session, Tab).
 
 client_loop(SPid, Session, Tab) ->
     SPid ! {client, self(), file},
     receive
 	{server, file, File} ->
-	    ok = load_file(Session, Tab, File),
+	    ok = load_file(SPid, Session, Tab, File),
 	    client_loop(SPid, Session, Tab);
 	{server, stop} ->
 	    ok
     end.
 
-load_file(Session, Tab, Filename) ->
-    %%io:format("[~p:~p] ~p is loading ~p~n", [?MODULE, ?LINE, self(), File]).
+load_file(SPid, Session, Tab, Filename) ->
     case file:read_file(Filename)  of
 	{error, Reason} ->
-	    {error,{Filename, file:format_error(Reason)}};
+	%%io:format("[~p:~p] read file error ~p~n",[?MODULE, ?LINE, Reason]),
+	    {error, {Filename, file:format_error(Reason)}};
 	{ok, Binary} ->
-	    Terms = decode_loop(Binary, []),
-	    write_terms(Session, Tab, Terms)
+	    decode_loop(SPid, Session, Tab, Binary)
     end.
 
-decode_loop(Binary, Acc) ->
+decode_loop(SPid, Session, Tab, Binary) ->
     case jiffy:decode(Binary, [{null_term, undefined},
 			       return_trailer]) of
 	{has_trailer, Term, RestData} ->
-	    decode_loop(RestData, [Term | Acc]);
+	    spawn(fun() -> write_term(SPid, Session, Tab, Term) end),
+	    decode_loop(SPid, Session, Tab, RestData);
 	Term ->
-	    lists:reverse([Term | Acc])
+	    write_term(SPid, Session, Tab, Term),
+	    ok
     end.
 
-write_terms(Session, Tab, [Term | Rest]) ->
+write_term(SPid, Session, Tab, Term) ->
     %io:format("[~p:~p] Rest length: ~p~n", [?MODULE, ?LINE, length(Rest)]),
     case my_fold(Term) of
 	{Key, Value} ->
-	    pbpc:write(Session, Tab, Key, Value);
+	    Res = rpc(Session, write, [Tab, Key, Value]),
+	    SPid ! {write_result, Res};
 	skip ->
 	    ok
-    end,
-    write_terms(Session, Tab, Rest);
-write_terms(_Session, _Tab, []) ->
-    ok.
+    end.
 
 my_fold({List}) ->
     my_fold(List, undefined, []).
@@ -169,3 +190,8 @@ format_list([Elem | Rest], Acc) ->
     format_list(Rest, [format_value(Elem) | Acc]);
 format_list([], Acc) ->
     lists:reverse(Acc).
+
+rpc(Node, Fun, Args) when is_atom(Node)->
+    rpc:call(Node, enterdb, Fun, Args);
+rpc(Session, Fun, Args) ->
+    apply(pbpc, Fun, [Session | Args]).
