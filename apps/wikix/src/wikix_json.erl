@@ -33,6 +33,8 @@
 
 -include_lib("gb_log/include/gb_log.hrl").
 
+-define(CHUNK, 25).
+
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -54,16 +56,18 @@ import(Connection, Dir, N) ->
     rpc(Session, delete_table, [Tab]),
     ok = rpc(Session, create_table, [Tab, ["title"], [{type, rocksdb},
 						     %%{ttl, 3000},
-						      {num_of_shards, 8},
+						      {num_of_shards, 12},
+						      {distributed, false},
 						      {hashing_method, uniform},
 						      {data_model, array},
 						      {comparator, ascending}]]),
-    IndexOn = [ "auxiliary_text","category","content_model","coordinates",
-		"defaultsort","external_link","heading","incoming_links",
-		"language","namespace","namespace_text","opening_text",
-		"outgoing_link","popularity_score","redirect","source_text",
-		"template","text","text_bytes","timestamp","version",
-		"version_type","wiki","wikibase_item"],
+    %IndexOn = [ "auxiliary_text","category","content_model","coordinates",
+%		"defaultsort","external_link","heading","incoming_links",
+%		"language","namespace","namespace_text","opening_text",
+%		"outgoing_link","popularity_score","redirect","source_text",
+%		"template","text","text_bytes","timestamp","version",
+%		"version_type","wiki","wikibase_item"],
+    IndexOn = ["text"],
     ok = rpc(Session, add_index, [Tab, IndexOn]),
     disconnect(Session),
     SPid = spawn(?MODULE, server, [Dir, Filenames, N, 0, 0]),
@@ -92,9 +96,9 @@ server(Dir, Filenames, N, S, F) ->
 	stop ->
 	    server(Dir, [], N, S, F);
 	{write_result, ok} ->
-	    server(Dir, Filenames, N, S+1, F);
+	    server(Dir, Filenames, N, S+?CHUNK, F);
 	{write_result, {error, _}} ->
-	    server(Dir, Filenames, N, S, F+1);
+	    server(Dir, Filenames, N, S, F+?CHUNK);
 	{client, Pid, register} ->
 	    erlang:monitor(process, Pid),
 	    server(Dir, Filenames, N, S, F);
@@ -117,10 +121,14 @@ client(SPid, Connection, Tab) ->
     client_loop(SPid, Session, Tab).
 
 client_loop(SPid, Session, Tab) ->
+    Start = os:timestamp(),
     SPid ! {client, self(), file},
     receive
 	{server, file, File} ->
 	    ok = load_file(SPid, Session, Tab, File),
+	    Stop = os:timestamp(),
+	    Time = timer:now_diff(Stop, Start)/1000/1000,
+	    io:format("~p ~p took ~.3f~n",[self(), File, Time]),
 	    client_loop(SPid, Session, Tab);
 	{server, stop} ->
 	    ok
@@ -132,17 +140,22 @@ load_file(SPid, Session, Tab, Filename) ->
 	%%io:format("[~p:~p] read file error ~p~n",[?MODULE, ?LINE, Reason]),
 	    {error, {Filename, file:format_error(Reason)}};
 	{ok, Binary} ->
-	    decode_loop(SPid, Session, Tab, Binary)
+	    decode_loop(SPid, Session, Tab, Binary, [], 0)
     end.
 
-decode_loop(SPid, Session, Tab, Binary) ->
+decode_loop(SPid, Session, Tab, Binary, Auc, ?CHUNK) ->
+    write_terms(SPid, Session, Auc),
+    decode_loop(SPid, Session, Tab, Binary, [], 0);
+
+decode_loop(SPid, Session, Tab, Binary, Auc, It) ->
     case jiffy:decode(Binary, [{null_term, undefined},
 			       return_trailer]) of
 	{has_trailer, Term, RestData} ->
-	    spawn(fun() -> write_term(SPid, Session, Tab, Term) end),
-	    decode_loop(SPid, Session, Tab, RestData);
+	    NewAuc = add_term(Auc, Tab, Term),
+	    decode_loop(SPid, Session, Tab, RestData, NewAuc, It+1);
 	Term ->
-	    write_term(SPid, Session, Tab, Term),
+	    NewAuc = add_term(Auc, Tab, Term),
+	    write_terms(SPid, Session, NewAuc),
 	    ok
     end.
 
@@ -156,10 +169,32 @@ write_term(SPid, Session, Tab, Term) ->
 	    ok
     end.
 
+add_term(Auc, Tab, Term) ->
+    case my_fold(Term) of
+	{Key, Value} ->
+	    [{Tab, Key, Value} | Auc];
+	skip ->
+	    Auc
+    end.
+
+write_terms(SPid, Session, Terms) ->
+    %Start = os:timestamp(),
+    Res = rpc(Session, write, [Terms]),
+    %Res = [ok],
+    %Stop = os:timestamp(),
+    %io:format("write_terms ~p ~.3f~n", [self(), timer:now_diff(Stop, Start)/1000/1000]),
+    SPid ! {write_result, get_res(lists:usort(Res))}.
+
+get_res([ok]) ->
+    ok;
+get_res(_) ->
+    {error, failed}.
+
 my_fold({List}) ->
     my_fold(List, undefined, []).
 my_fold([{<<"title">>, TitleBin} | Rest], _K, V) ->
-    my_fold(Rest, [{"title", binary_to_list(TitleBin)}], V);
+    my_fold(Rest, [{"title", binary_to_list(TitleBin)}],
+		  [{"title", format_value(TitleBin)} | V]);
 my_fold([{FBin, <<>>} | Rest], K, V) ->
     my_fold(Rest, K, [{binary_to_list(FBin), ""} | V]);
 my_fold([{FBin, FVal} | Rest], K, V) ->
