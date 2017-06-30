@@ -67,7 +67,15 @@ import(Connection, Dir, N) ->
 %		"outgoing_link","popularity_score","redirect","source_text",
 %		"template","text","text_bytes","timestamp","version",
 %		"version_type","wiki","wikibase_item"],
-    IndexOn = ["text"],
+    IndexOptions = 
+	#{char_filter => nfc,
+	  token_filter =>
+	    #{add => undefined,
+	      delete => [english_stopwords],
+	      transform => lowercase,
+	      stats => freqs},
+	  tokenizer => unicode_word_boundaries},
+    IndexOn = [{"text", IndexOptions}],
     ok = rpc(Session, add_index, [Tab, IndexOn]),
     disconnect(Session),
     SPid = spawn(?MODULE, server, [Dir, Filenames, N, 0, 0]),
