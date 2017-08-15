@@ -28,6 +28,9 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
+    gb_beam_autoloader:start(),
+    gb_log_oam:load_store_filters_beam(),
+    gb_log_oam:load_default_filter(),
     {ok, { {one_for_all, 0, 1}, []} }.
 
 %%====================================================================

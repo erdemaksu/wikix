@@ -71,7 +71,7 @@ index_on_node_(Tab) ->
 	{error,invalid} ->
 	    {ok, 0}
     end.
-    
+
 index_loop_on_node(Tab, {Key, Val}, It, Count) ->
     case Count rem 10000 of
 	0 -> io:format("~p.",[Count]);
@@ -107,7 +107,7 @@ index(Session, Tab) ->
 	{error,invalid} ->
 	    {ok, 0}
     end.
-    
+
 index_loop(Session, Tab, {Key, Val}, It, Count) ->
     case Count rem 10000 of
 	0 -> io:format("~p.",[Count]);
@@ -217,7 +217,7 @@ store(Session, Data = #{"title" := Title}) ->
 			 (K, V, Acc) -> [{K, V} | Acc] end,
 		      [],  Data),
     pbpc:write(Session, ?TABLE, Key, Value).
- 
+
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================

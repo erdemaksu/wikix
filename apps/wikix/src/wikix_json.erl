@@ -25,7 +25,9 @@
 
 %% API functions
 -export([import/2,
-	 import/3]).
+	 import/3,
+	 test/0,
+	 test/2]).
 
 %% Spawned functions
 -export([server/5,
@@ -38,19 +40,25 @@
 %%%===================================================================
 %%% API functions
 %%%===================================================================
+test() ->
+    test("enwikiquote", 1).
+
+test(Tab, N) ->
+    import("/nvme/data/"++Tab, N).
+
 import(Dir, N) ->
-    {ok, Session} = pbpc:connect("127.0.0.1", 8887, "admin", "admin"),
-    import(Session, Dir, N),
-    ok = pbpc:disconnect(Session).
+    Connection = {"127.0.0.1", 8887, "admin", "admin"},
+    import(Connection, Dir, N).
 
 -spec import(Connection :: term(),
 	     Dir :: string(),
 	     N :: integer() | undefined) ->
     ok.
 import(Connection, Dir, N) ->
-    {ok, Filenames} = file:list_dir(Dir),
+    io:format("~p:~p(~p, ~p, ~p).~n", [?MODULE, ?FUNCTION_NAME,
+				     Connection, Dir, N]),
     %io:format("[~p:~p] Filenames: ~p~n", [?MODULE, ?LINE, Filenames]),
-
+    {ok, Filenames} = file:list_dir(Dir),
     Tab = filename:basename(Dir),
     {ok, Session} = connect(Connection),
     rpc(Session, delete_table, [Tab]),
@@ -67,7 +75,7 @@ import(Connection, Dir, N) ->
 %		"outgoing_link","popularity_score","redirect","source_text",
 %		"template","text","text_bytes","timestamp","version",
 %		"version_type","wiki","wikibase_item"],
-    IndexOptions = 
+    IndexOptions =
 	#{char_filter => nfc,
 	  token_filter =>
 	    #{add => undefined,
@@ -75,20 +83,20 @@ import(Connection, Dir, N) ->
 	      transform => lowercase,
 	      stats => freqs},
 	  tokenizer => unicode_word_boundaries},
-    IndexOn = [{"text", IndexOptions}],
+    IndexOn = [#{column => "text", options => IndexOptions}],
     ok = rpc(Session, add_index, [Tab, IndexOn]),
-    disconnect(Session),
+    ok = disconnect(Session),
     SPid = spawn(?MODULE, server, [Dir, Filenames, N, 0, 0]),
-    [spawn(?MODULE, client, [SPid, Connection, Tab] ) || _ <- lists:seq(1,N)],
     _MonitorRef = erlang:monitor(process, SPid),
     register(my_server, SPid),
+    [spawn(?MODULE, client, [SPid, Connection, Tab] ) || _ <- lists:seq(1,N)],
     {ok, SPid}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-connect(Node) when is_atom(Node) ->
-    {ok, Node};
+connect(Pid) when is_pid(Pid) ->
+    {ok, Pid};
 connect({Host, Port, User, Pass}) ->
     pbpc:connect(Host, Port, User, Pass).
 
@@ -98,7 +106,7 @@ disconnect(Session) when is_pid(Session) ->
     pbpc:disconnect(Session).
 
 server(_Dir, _Filenames, 0, Success, Fail) ->
-   io:format("[~p:~p] Success: ~p Fail: ~p~nServer stopping..~n",[?MODULE,?LINE, Success, Fail]);
+    io:format("[~p:~p] Success: ~p Fail: ~p~nServer stopping..~n",[?MODULE,?LINE, Success, Fail]);
 server(Dir, Filenames, N, S, F) ->
     receive
 	stop ->
@@ -136,16 +144,16 @@ client_loop(SPid, Session, Tab) ->
 	    ok = load_file(SPid, Session, Tab, File),
 	    Stop = os:timestamp(),
 	    Time = timer:now_diff(Stop, Start)/1000/1000,
-	    io:format("~p ~p took ~.3f~n",[self(), File, Time]),
+	    io:format("~p took ~p seconds to load.~n", [File, Time]),
 	    client_loop(SPid, Session, Tab);
 	{server, stop} ->
-	    ok
+	    ok = disconnect(Session)
     end.
 
 load_file(SPid, Session, Tab, Filename) ->
     case file:read_file(Filename)  of
 	{error, Reason} ->
-	%%io:format("[~p:~p] read file error ~p~n",[?MODULE, ?LINE, Reason]),
+	    io:format("[~p:~p] read file error ~p~n",[?MODULE, ?LINE, Reason]),
 	    {error, {Filename, file:format_error(Reason)}};
 	{ok, Binary} ->
 	    decode_loop(SPid, Session, Tab, Binary, [], 0)
@@ -180,17 +188,15 @@ write_term(SPid, Session, Tab, Term) ->
 add_term(Auc, Tab, Term) ->
     case my_fold(Term) of
 	{Key, Value} ->
-	    [{Tab, Key, Value} | Auc];
+	    [[Tab, Key, Value] | Auc];
 	skip ->
 	    Auc
     end.
 
 write_terms(SPid, Session, Terms) ->
-    %Start = os:timestamp(),
-    Res = rpc(Session, write, [Terms]),
-    %Res = [ok],
-    %Stop = os:timestamp(),
-    %io:format("write_terms ~p ~.3f~n", [self(), timer:now_diff(Stop, Start)/1000/1000]),
+    %%Start = os:timestamp(),
+    Res = [ rpc(Session, write, Args) || Args <- Terms],
+    %%Stop = os:timestamp(),
     SPid ! {write_result, get_res(lists:usort(Res))}.
 
 get_res([ok]) ->
