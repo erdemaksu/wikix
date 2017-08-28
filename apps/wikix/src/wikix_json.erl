@@ -31,6 +31,7 @@
 	 test/0,
 	 test_rpc/0,
 	 test/3,
+	 index_read/2,
 	 decode_encode/0]).
 
 %% Spawned functions
@@ -56,6 +57,13 @@ profile(0) ->
 profile(N) ->
     true = decode_encode(),
     profile(N-1).
+
+index_read(Term, Limit) ->
+    Connection = {"127.0.0.1", 8887, "admin", "admin"},
+    {ok, Session} = connect(Connection),
+    Res = rpc(Session, index_read, ["enwikiquote", "text", Term, Limit]),
+    ok = disconnect(Session),
+    Res.
 
 test() ->
     Connection = {"127.0.0.1", 8887, "admin", "admin"},
@@ -86,7 +94,7 @@ import(Connection, Dir, N) ->
     TableOptions = [{type, rocksdb},
 		    %%{ttl, 3000},
 		    {num_of_shards, 12},
-		    {distributed, false},
+		    {distributed, true},
 		    {hashing_method, uniform},
 		    {data_model, array},
 		    {comparator, ascending}],
@@ -105,7 +113,7 @@ import(Connection, Dir, N) ->
 	      transform => lowercase,
 	      stats => freqs},
 	  tokenizer => unicode_word_boundaries},
-    IndexOn = [#{column => "text", options => IndexOptions}],
+    IndexOn = [{"text", IndexOptions}],
     ok = rpc(Session, add_index, [Tab, IndexOn]),
     ok = disconnect(Session),
     SPid = spawn(?MODULE, server, [Dir, Filenames, N, 0, 0]),
